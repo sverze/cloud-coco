@@ -44,4 +44,5 @@ export interface AppSecrets {
   allowedChatIds: Set<number>;
   webhookSecret: string;
   relayUrl: string | undefined;
+  relayBearerToken: string | undefined;
 }

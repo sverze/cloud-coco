@@ -18,13 +18,52 @@ contextPack = await loadContextPack(secrets.contextPackKey);
 const ageH = Math.floor((Date.now() - new Date(contextPack.generated).getTime()) / 3_600_000);
 console.log(`[server] startup complete — context pack age: ${ageH}h`);
 
+// ── Relay client ───────────────────────────────────────────────────────────
+
+const RELAY_HEALTH_TIMEOUT_MS = 1_000;
+const RELAY_MESSAGE_TIMEOUT_MS = 57_000;
+
+async function relayIsReachable(relayUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${relayUrl}/health`, {
+      signal: AbortSignal.timeout(RELAY_HEALTH_TIMEOUT_MS),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function askRelay(relayUrl: string, bearerToken: string, text: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${relayUrl}/message`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(RELAY_MESSAGE_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.error(`[relay-client] relay returned ${res.status}`);
+      return null;
+    }
+    const data = (await res.json()) as { reply?: string };
+    return data.reply ?? null;
+  } catch (err) {
+    console.error(`[relay-client] error: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 // ── Command handlers ───────────────────────────────────────────────────────
 
 function handleStart(): string {
   return `Hi! I'm Coco — your always-on assistant running in the cloud.
 
 Commands:
-/status — context pack age and sync info
+/status — context pack age, relay state, and sync info
 /sync — reload context pack from GCS
 /memory [query] — deep memory search (Phase 2, coming soon)
 
@@ -45,13 +84,36 @@ async function handleStatus(): Promise<string> {
   }).length;
   const ageH = Math.floor((Date.now() - new Date(contextPack.generated).getTime()) / 3_600_000);
   const staleWarning = ageH >= 72 ? `\n⚠️ Context is ${Math.floor(ageH / 24)} days old — run /sync` : "";
-  return `Context pack: ${contextPack.generated}\nLast sync: ${contextPack.last_sync}\nAge: ${ageH}h\nToday's exchanges: ${todayCount}${staleWarning}`;
+
+  let relayState: string;
+  if (!secrets.relayUrl) {
+    relayState = "not configured";
+  } else {
+    relayState = (await relayIsReachable(secrets.relayUrl)) ? "online" : "offline";
+  }
+
+  return `Context pack: ${contextPack.generated}\nLast sync: ${contextPack.last_sync}\nAge: ${ageH}h\nToday's exchanges: ${todayCount}\nRelay: ${relayState}${staleWarning}`;
 }
 
 async function handleMessage(chatId: number, text: string): Promise<void> {
   const window = await loadConversationWindow();
-  const systemPrompt = buildSystemPrompt(contextPack, window);
-  const reply = await askClaude(systemPrompt, text, secrets.claudeApiKey);
+  let reply: string;
+
+  // ISC-20/21: try relay first if configured and reachable
+  if (secrets.relayUrl && secrets.relayBearerToken && await relayIsReachable(secrets.relayUrl)) {
+    console.log("[server] routing to MacBook relay");
+    const relayReply = await askRelay(secrets.relayUrl, secrets.relayBearerToken, text);
+    if (relayReply) {
+      reply = relayReply;
+    } else {
+      console.log("[server] relay failed — falling back to context-pack path");
+      const systemPrompt = buildSystemPrompt(contextPack, window);
+      reply = await askClaude(systemPrompt, text, secrets.claudeApiKey);
+    }
+  } else {
+    const systemPrompt = buildSystemPrompt(contextPack, window);
+    reply = await askClaude(systemPrompt, text, secrets.claudeApiKey);
+  }
 
   const now = new Date().toISOString();
   await Promise.all([
