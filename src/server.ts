@@ -65,6 +65,10 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
 // ── Request handler ────────────────────────────────────────────────────────
 
 async function handleWebhook(req: Request): Promise<Response> {
+  // ISC-1/2: validate webhook secret before any processing
+  const incomingSecret = req.headers.get("x-telegram-bot-api-secret-token") ?? "";
+  if (incomingSecret !== secrets.webhookSecret) return new Response(null, { status: 200 });
+
   let update: TelegramUpdate;
   try {
     update = (await req.json()) as TelegramUpdate;

@@ -18,11 +18,11 @@ export async function sendMessage(chatId: number, text: string, token: string): 
   }
 }
 
-export async function setWebhook(url: string, token: string): Promise<void> {
+export async function setWebhook(url: string, token: string, secretToken?: string): Promise<void> {
   const res = await fetch(apiUrl(token, "setWebhook"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, ...(secretToken ? { secret_token: secretToken } : {}) }),
   });
   const data = (await res.json()) as { ok: boolean; description?: string };
   if (!data.ok) throw new Error(`setWebhook failed: ${data.description}`);

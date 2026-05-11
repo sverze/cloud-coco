@@ -32,13 +32,15 @@ async function getSecret(name: string, projectId: string, token: string): Promis
 
 async function loadFromCloudRun(): Promise<AppSecrets> {
   const [projectId, token] = await Promise.all([getProjectId(), getAccessToken()]);
-  const [claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr] = await Promise.all([
+  const [claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr, webhookSecret, relayUrl] = await Promise.all([
     getSecret("CLAUDE_API_KEY", projectId, token),
     getSecret("TELEGRAM_BOT_TOKEN", projectId, token),
     getSecret("CONTEXT_PACK_KEY", projectId, token),
     getSecret("ALLOWED_CHAT_IDS", projectId, token),
+    getSecret("TELEGRAM_WEBHOOK_SECRET", projectId, token),
+    getSecret("RELAY_URL", projectId, token).catch(() => ""),
   ]);
-  return buildSecrets(claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr);
+  return buildSecrets(claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr, webhookSecret, relayUrl);
 }
 
 function loadFromEnv(): AppSecrets {
@@ -46,20 +48,24 @@ function loadFromEnv(): AppSecrets {
   const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
   const contextPackKeyHex = process.env.CONTEXT_PACK_KEY;
   const allowedChatIdsStr = process.env.ALLOWED_CHAT_IDS;
+  const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
 
   if (!claudeApiKey) throw new Error("CLAUDE_API_KEY env var is required");
   if (!telegramToken) throw new Error("TELEGRAM_BOT_TOKEN env var is required");
   if (!contextPackKeyHex) throw new Error("CONTEXT_PACK_KEY env var is required");
   if (!allowedChatIdsStr) throw new Error("ALLOWED_CHAT_IDS env var is required");
+  if (!webhookSecret) throw new Error("TELEGRAM_WEBHOOK_SECRET env var is required");
 
-  return buildSecrets(claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr);
+  return buildSecrets(claudeApiKey, telegramToken, contextPackKeyHex, allowedChatIdsStr, webhookSecret, process.env.RELAY_URL ?? "");
 }
 
 function buildSecrets(
   claudeApiKey: string,
   telegramToken: string,
   contextPackKeyHex: string,
-  allowedChatIdsStr: string
+  allowedChatIdsStr: string,
+  webhookSecret: string,
+  relayUrlRaw: string
 ): AppSecrets {
   const trimmedKey = contextPackKeyHex.trim();
   if (trimmedKey.length !== 64) {
@@ -69,7 +75,8 @@ function buildSecrets(
   const allowedChatIds = new Set(
     allowedChatIdsStr.split(",").map((s) => parseInt(s.trim(), 10)).filter(Number.isFinite)
   );
-  return { claudeApiKey, telegramToken, contextPackKey, allowedChatIds };
+  const relayUrl = relayUrlRaw.trim() || undefined;
+  return { claudeApiKey, telegramToken, contextPackKey, allowedChatIds, webhookSecret, relayUrl };
 }
 
 export async function loadSecrets(): Promise<AppSecrets> {

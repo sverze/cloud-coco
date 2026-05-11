@@ -42,4 +42,6 @@ export interface AppSecrets {
   telegramToken: string;
   contextPackKey: Buffer;
   allowedChatIds: Set<number>;
+  webhookSecret: string;
+  relayUrl: string | undefined;
 }
