@@ -1,13 +1,15 @@
 /**
- * mcp.ts — Cloud Coco MCP server (HTTP + SSE transport)
+ * mcp.ts — Cloud Coco MCP server (Streamable HTTP transport)
  *
  * Exposes Cloud Coco as a remote MCP server so Claude Code on any device
  * (MacBook, iPhone, browser) can access persistent memory, context, and
  * Telegram notifications as native tools.
  *
- * Transport: HTTP + SSE (MCP spec 2024-11-05)
- *   GET  /mcp          — open SSE stream, receive endpoint URL
- *   POST /mcp/message  — send JSON-RPC 2.0 messages
+ * Transport: Streamable HTTP (MCP spec 2025-03-26)
+ *   POST /mcp — stateless JSON-RPC 2.0 endpoint, responds with JSON
+ *
+ * No sessions, no SSE streams — each request is fully self-contained.
+ * This works naturally with Cloud Run's stateless request model.
  *
  * Auth: Bearer token (MCP_BEARER_TOKEN secret), timing-safe compare.
  *
@@ -18,7 +20,7 @@
  *   learnings/YYYY-MM-DD.jsonl      — captured learnings
  */
 
-import { timingSafeEqual, randomUUID } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { readdir, readFile, appendFile, mkdir } from "node:fs/promises";
 import type { AppSecrets, ContextPack } from "./types.ts";
 import { sendMessage } from "./telegram.ts";
@@ -35,23 +37,6 @@ interface JsonRpcRequest {
 type JsonRpcResponse =
   | { jsonrpc: "2.0"; id: string | number | null; result: unknown }
   | { jsonrpc: "2.0"; id: string | number | null; error: { code: number; message: string } };
-
-// ── Session store ─────────────────────────────────────────────────────────
-
-interface Session {
-  send: (data: string) => void;
-  createdAt: number;
-}
-
-const sessions = new Map<string, Session>();
-const enc = new TextEncoder();
-
-setInterval(() => {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  for (const [id, s] of sessions) {
-    if (s.createdAt < cutoff) sessions.delete(id);
-  }
-}, 5 * 60 * 1000).unref();
 
 // ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -483,70 +468,9 @@ async function dispatch(
   }
 }
 
-// ── HTTP handlers ─────────────────────────────────────────────────────────
+// ── HTTP handler (stateless Streamable HTTP transport) ────────────────────
 
-export function handleMcpConnect(
-  req: Request,
-  secrets: AppSecrets,
-  getContextPack: () => ContextPack,
-): Response {
-  if (!secrets.mcpBearerToken || !checkBearer(req, secrets.mcpBearerToken)) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  const sessionId = randomUUID();
-  const host =
-    req.headers.get("x-forwarded-host") ??
-    req.headers.get("host") ??
-    "cloud-coco-747929980753.us-central1.run.app";
-
-  let sendFn!: (data: string) => void;
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      sendFn = (data: string) => {
-        try {
-          controller.enqueue(enc.encode(data));
-        } catch { /* stream already closed */ }
-      };
-
-      // Send endpoint event so client knows where to POST messages
-      const messageUrl = `https://${host}/mcp/message?sessionId=${sessionId}`;
-      controller.enqueue(enc.encode(`event: endpoint\ndata: ${messageUrl}\n\n`));
-
-      // Keepalive to prevent intermediary timeouts (25s < typical 30s proxy timeout)
-      const timer = setInterval(() => {
-        try {
-          controller.enqueue(enc.encode(": keepalive\n\n"));
-        } catch {
-          clearInterval(timer);
-        }
-      }, 25_000);
-      timer.unref();
-    },
-    cancel() {
-      sessions.delete(sessionId);
-      console.log(`[mcp] session ${sessionId.slice(0, 8)} disconnected`);
-    },
-  });
-
-  sessions.set(sessionId, { send: sendFn, createdAt: Date.now() });
-  console.log(`[mcp] session ${sessionId.slice(0, 8)} connected`);
-
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      "x-accel-buffering": "no",
-      "connection": "keep-alive",
-    },
-  });
-}
-
-export async function handleMcpMessage(
+export async function handleMcpPost(
   req: Request,
   secrets: AppSecrets,
   getContextPack: () => ContextPack,
@@ -558,17 +482,6 @@ export async function handleMcpMessage(
     });
   }
 
-  const url = new URL(req.url);
-  const sessionId = url.searchParams.get("sessionId");
-  if (!sessionId) {
-    return new Response(JSON.stringify({ error: "missing sessionId" }), { status: 400 });
-  }
-
-  const session = sessions.get(sessionId);
-  if (!session) {
-    return new Response(JSON.stringify({ error: "session not found — reconnect" }), { status: 404 });
-  }
-
   let body: unknown;
   try {
     body = await req.json();
@@ -577,13 +490,17 @@ export async function handleMcpMessage(
   }
 
   const messages: JsonRpcRequest[] = Array.isArray(body) ? body : [body as JsonRpcRequest];
+  const responses: JsonRpcResponse[] = [];
 
   for (const msg of messages) {
     const response = await dispatch(msg, secrets, getContextPack);
-    if (response !== null) {
-      session.send(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
-    }
+    if (response !== null) responses.push(response);
   }
 
-  return new Response(null, { status: 202 });
+  if (responses.length === 0) return new Response(null, { status: 202 });
+
+  const body_out = responses.length === 1 ? responses[0] : responses;
+  return new Response(JSON.stringify(body_out), {
+    headers: { "content-type": "application/json" },
+  });
 }
