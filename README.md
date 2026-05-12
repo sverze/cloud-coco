@@ -1,6 +1,6 @@
 # Cloud Coco
 
-A cloud-resident personal assistant running as a Telegram bot on GCP Cloud Run. Cloud Coco is the always-on counterpart to a local [PAI](https://github.com/sverze/pai) instance — it carries your identity, goals, and preferences into the cloud so you can query your assistant from anywhere, even when your MacBook is closed.
+A cloud-resident personal assistant running on GCP Cloud Run. Cloud Coco is the always-on counterpart to a local [PAI](https://github.com/sverze/pai) instance — it carries your identity, goals, and preferences into the cloud and exposes them to every Claude surface you use: Telegram, Claude Code on MacBook, Claude Code on iPhone, and the claude.ai browser.
 
 ## Architecture
 
@@ -16,28 +16,36 @@ MacBook (PAI)                           GCP
   context-pack                            TELEGRAM_WEBHOOK_SECRET
   (encrypted)  ──────────────────────►    RELAY_URL
                                           RELAY_BEARER_TOKEN
-  relay-server.ts (127.0.0.1:3001)
-       ▲               │                GCS bucket
-       │               │                  context-pack.json.enc (AES-256-GCM)
-  Tailscale Funnel     │                  conversations/YYYY-MM-DD.jsonl
-  (HTTPS tunnel)       │
-       ▲               │                Cloud Run (Bun server)
-       │               └──────────────►   │  route-or-fallback
-       │                                  │  ├── relay online → MacBook Claude
-       └──────────────────────────────────┘  └── relay offline → context-pack + web search
-                                          │
-                                    Telegram bot (webhook)
+  relay-server.ts (127.0.0.1:3001)        MCP_BEARER_TOKEN
+       ▲               │
+       │               │                GCS bucket (FUSE-mounted at /memory)
+  Tailscale Funnel     │                  context-pack.json.enc (AES-256-GCM)
+  (HTTPS tunnel)       │                  conversations/YYYY-MM-DD.jsonl
+       ▲               │                  notes/YYYY-MM-DD.jsonl
+       │               │                  decisions/YYYY-MM-DD.jsonl
+       └───────────────┘                  learnings/YYYY-MM-DD.jsonl
+
+                                        Cloud Run (Bun server)
+Claude Code (MacBook) ──── MCP ────────►  POST /mcp  (Streamable HTTP)
+Claude Code (iPhone)  ──── MCP ────────►  POST /mcp
+claude.ai browser ── OAuth+MCP ────────►  GET  /authorize
+                                          POST /oauth/token
+                                          POST /mcp
+
+Telegram ──── webhook ─────────────────►  POST /webhook
+                                            ├── relay online → MacBook Claude
+                                            └── relay offline → context-pack + web search
 ```
 
-**Two response paths:**
+**Access surfaces:**
 
-1. **Relay path (primary)** — when your MacBook is reachable via Tailscale Funnel, Cloud Run forwards the message to the local relay server, which feeds it to `claude --print` on your MacBook. You get full local PAI context, current working directory, and any Claude Code capabilities.
+- **Telegram** — the original always-on chat interface. Relay path (MacBook Claude) when online; context-pack fallback when offline.
+- **Claude Code (MCP)** — 12 tools available in any Claude Code session on MacBook or iPhone: memory search, note logging, goals, daily brief, decision/learning logging, conversation history, Telegram notifications, and more.
+- **claude.ai browser (MCP)** — same 12 tools via OAuth 2.0 Authorization Code + PKCE connector.
 
-2. **Fallback path** — when the MacBook is offline or the relay is unreachable, Cloud Run answers directly using the encrypted context pack stored in GCS, with web search via Anthropic's `web_search_20250305` tool.
+**Context pack** — a distilled JSON snapshot of your PAI identity, goals, and preferences. Generated locally, AES-256-GCM encrypted, pushed to GCS. Loaded at Cloud Run startup and refreshed on `/sync`.
 
-**Context pack** — a distilled JSON snapshot of your PAI identity, goals, and preferences. Generated locally from your live PAI memory files, encrypted with AES-256-GCM, and pushed to GCS. The Cloud Run server reads it at startup and on `/sync`.
-
-**Conversation log** — every exchange is appended to a daily JSONL file in GCS regardless of which path handled it. Each request loads the last 20 entries from today plus the last 10 from yesterday as a sliding context window.
+**Conversation log** — every Telegram exchange is appended to a daily JSONL file in GCS. Each request loads the last 20 entries as a sliding context window.
 
 ## Prerequisites
 
@@ -87,45 +95,51 @@ PAI_DIR=/path/to/your/PAI bun sync
 
 ### 4. Set up the MacBook relay (recommended)
 
-The relay lets Cloud Coco route messages to your local Claude Code instance when your MacBook is online.
+The relay lets Cloud Coco route Telegram messages to your local Claude Code instance when your MacBook is online.
 
 **a. Generate a bearer token and configure Tailscale Funnel:**
 
 ```bash
-# Generate a strong random token
 openssl rand -hex 32
 
-# Store it in Secret Manager
 echo -n "YOUR_TOKEN" | gcloud secrets create RELAY_BEARER_TOKEN --data-file=- --project=YOUR_PROJECT_ID
 echo -n "https://YOUR-MACHINE.tailbfcc6e.ts.net" | gcloud secrets create RELAY_URL --data-file=- --project=YOUR_PROJECT_ID
-
-# Add to ~/.env.cloud-coco
 echo "RELAY_BEARER_TOKEN=YOUR_TOKEN" >> ~/.env.cloud-coco
 
-# Enable Tailscale Funnel (persists across reboots)
 tailscale funnel --bg localhost:3001
 ```
 
 **b. Install the relay as a launchd service (auto-starts at login):**
 
 ```bash
-# Install the plist (edit paths if needed)
 cp ~/Library/LaunchAgents/com.cloud-coco.relay.plist ~/Library/LaunchAgents/com.cloud-coco.relay.plist
 launchctl load ~/Library/LaunchAgents/com.cloud-coco.relay.plist
 
-# Tail logs
 tail -f /tmp/cloud-coco-relay.log /tmp/cloud-coco-relay.error.log
 ```
 
 The plist template is embedded at the bottom of `tools/relay-server.ts`. The relay binds to `127.0.0.1:3001` only — Tailscale Funnel is the sole external ingress.
 
-**c. Store the webhook secret:**
+### 5. Generate an MCP bearer token
+
+The MCP server authenticates all Claude Code and claude.ai connections with a single bearer token:
 
 ```bash
-openssl rand -hex 32 | gcloud secrets create TELEGRAM_WEBHOOK_SECRET --data-file=- --project=YOUR_PROJECT_ID
+openssl rand -hex 32
+
+echo -n "YOUR_MCP_TOKEN" | gcloud secrets create MCP_BEARER_TOKEN --data-file=- --project=YOUR_PROJECT_ID
+echo "MCP_BEARER_TOKEN=YOUR_MCP_TOKEN" >> ~/.env.cloud-coco
+
+# Grant the Cloud Run SA access to the new secret
+gcloud secrets add-iam-policy-binding MCP_BEARER_TOKEN \
+  --member="serviceAccount:cloud-coco-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=YOUR_PROJECT_ID
 ```
 
-### 5. Build and push the container image
+Redeploy after adding the secret so the updated `--set-secrets` flag picks it up.
+
+### 6. Build and push the container image
 
 ```bash
 PROJECT_ID=$(gcloud config get project)
@@ -139,7 +153,7 @@ docker push ${IMAGE}:latest
 
 > **Apple Silicon note:** `--platform linux/amd64` is required — Cloud Run only accepts `amd64` images.
 
-### 6. Deploy to Cloud Run
+### 7. Deploy to Cloud Run
 
 ```bash
 SA_EMAIL="cloud-coco-sa@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -152,7 +166,7 @@ gcloud run deploy cloud-coco \
   --execution-environment=gen2 \
   --add-volume=name=memory,type=cloud-storage,bucket=${BUCKET_NAME} \
   --add-volume-mount=volume=memory,mount-path=/memory \
-  --set-secrets=CLAUDE_API_KEY=CLAUDE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,CONTEXT_PACK_KEY=CONTEXT_PACK_KEY:latest,ALLOWED_CHAT_IDS=ALLOWED_CHAT_IDS:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,RELAY_URL=RELAY_URL:latest,RELAY_BEARER_TOKEN=RELAY_BEARER_TOKEN:latest \
+  --set-secrets=CLAUDE_API_KEY=CLAUDE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,CONTEXT_PACK_KEY=CONTEXT_PACK_KEY:latest,ALLOWED_CHAT_IDS=ALLOWED_CHAT_IDS:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,RELAY_URL=RELAY_URL:latest,RELAY_BEARER_TOKEN=RELAY_BEARER_TOKEN:latest,MCP_BEARER_TOKEN=MCP_BEARER_TOKEN:latest \
   --min-instances=0 \
   --max-instances=1 \
   --memory=512Mi \
@@ -161,7 +175,7 @@ gcloud run deploy cloud-coco \
   --allow-unauthenticated
 ```
 
-### 7. Register the Telegram webhook
+### 8. Register the Telegram webhook
 
 ```bash
 SERVICE_URL=$(gcloud run services describe cloud-coco --region=${REGION} --format='value(status.url)')
@@ -174,6 +188,53 @@ curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
 
 Open Telegram, find your bot, and send `/start`.
 
+### 9. Connect Claude Code (MacBook / iPhone)
+
+```bash
+MCP_TOKEN=$(grep MCP_BEARER_TOKEN ~/.env.cloud-coco | cut -d= -f2)
+SERVICE_URL="https://YOUR-PROJECT.us-central1.run.app"
+
+claude mcp add cloud-coco \
+  --transport http \
+  --scope user \
+  --header "Authorization: Bearer ${MCP_TOKEN}" \
+  "${SERVICE_URL}/mcp"
+```
+
+For iPhone: open **Claude Code** → Settings → MCP Servers → add server manually with the same URL and `Authorization: Bearer YOUR_TOKEN` header.
+
+Verify the connection:
+
+```bash
+claude mcp list
+# cloud-coco: https://... (connected)
+```
+
+### 10. Connect claude.ai browser
+
+In [claude.ai](https://claude.ai) → Settings → Integrations → **Add custom connector**:
+
+- **Remote MCP server URL:** `https://YOUR-PROJECT.us-central1.run.app/mcp`
+
+Claude will redirect to `/authorize` to complete the OAuth flow. No client secret is required — the bearer token issued after PKCE verification is your `MCP_BEARER_TOKEN`.
+
+## MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `search_memory` | Full-text search across conversations, notes, decisions, and learnings |
+| `log_note` | Save a note with optional tags and topic to GCS |
+| `get_context_pack` | Read the current context pack (identity, goals, preferences) |
+| `get_goals` | Return active goals from the context pack |
+| `get_daily_brief` | Today's exchange count, context pack age, relay state |
+| `log_decision` | Record a titled decision with rationale and project |
+| `log_learning` | Record an insight with optional project context |
+| `get_recent_conversations` | Last N Telegram conversation entries |
+| `get_recent_notes` | Last N logged notes |
+| `get_recent_decisions` | Last N logged decisions |
+| `get_recent_learnings` | Last N logged learnings |
+| `send_notification` | Send a Telegram message to the default chat |
+
 ## Bot commands
 
 | Command | Description |
@@ -182,7 +243,7 @@ Open Telegram, find your bot, and send `/start`.
 | `/status` | Context pack age, relay state (online/offline), today's exchange count |
 | `/sync` | Reload context pack from GCS (after running `bun sync` locally) |
 
-Any other message is treated as a conversation. If the relay is online it routes to your MacBook Claude; otherwise it answers from the context pack with web search.
+Any other Telegram message is treated as a conversation. If the relay is online it routes to your MacBook Claude; otherwise it answers from the context pack with web search.
 
 ## Keeping context fresh
 
@@ -200,6 +261,7 @@ export TELEGRAM_BOT_TOKEN=...
 export CONTEXT_PACK_KEY=...        # 64 hex chars
 export ALLOWED_CHAT_IDS=...
 export TELEGRAM_WEBHOOK_SECRET=... # any string locally
+export MCP_BEARER_TOKEN=...        # any string locally
 export RELAY_URL=...               # optional
 export RELAY_BEARER_TOKEN=...      # optional
 
@@ -213,7 +275,8 @@ The server listens on port 8080. Use [ngrok](https://ngrok.com/) or Tailscale Fu
 ```
 cloud-coco/
 ├── src/
-│   ├── server.ts        # Bun HTTP server, webhook handler, relay routing, command handling
+│   ├── server.ts        # Bun HTTP server — webhook, relay routing, MCP, OAuth
+│   ├── mcp.ts           # MCP Streamable HTTP handler (12 tools, GCS JSONL storage)
 │   ├── secrets.ts       # GCP Secret Manager (Cloud Run) or env vars (local)
 │   ├── memory.ts        # GCS context pack decrypt, conversation log read/write
 │   ├── system-prompt.ts # Builds Claude system prompt from context pack
@@ -232,12 +295,14 @@ cloud-coco/
 
 ## Security
 
-- **Webhook secret** — every Telegram update is validated with `X-Telegram-Bot-Api-Secret-Token` before any processing. Invalid tokens get a silent 200 (no information leak to attackers).
-- **Relay bearer token** — Cloud Run presents a Bearer token to the relay server. Compared with `timingSafeEqual` to prevent timing attacks. Relay rejects any token under 16 characters at startup.
-- **Relay bind** — the relay binds to `127.0.0.1` only. Tailscale Funnel is the sole external ingress; direct LAN access is impossible.
-- **Prompt injection hardening** — user text is passed to `claude` via stdin wrapped in `<<<MSG>>>/<<<END>>>` sentinels. Any message containing those sentinel strings is rejected before reaching the model.
-- **Scrubbed child env** — the relay's `claude` subprocess only inherits `PATH`, `HOME`, and `USER`. No API keys, GCP credentials, or GitHub tokens can leak into the subprocess.
+- **Webhook secret** — every Telegram update is validated with `X-Telegram-Bot-Api-Secret-Token` before any processing. Invalid tokens get a silent 200.
+- **MCP bearer token** — all MCP requests require `Authorization: Bearer TOKEN`. Compared with `timingSafeEqual` to prevent timing attacks.
+- **OAuth PKCE** — the claude.ai connector uses Authorization Code + S256 PKCE. Authorization codes are single-use UUID tokens with a 10-minute TTL stored in memory. PKCE verifier is checked with `SHA256(verifier) == challenge` before issuing the bearer token.
+- **Relay bearer token** — Cloud Run presents a bearer token to the relay. Relay rejects any token under 16 characters at startup.
+- **Relay bind** — the relay binds to `127.0.0.1` only. Tailscale Funnel is the sole external ingress.
+- **Prompt injection hardening** — user text is passed to `claude` via stdin wrapped in sentinels. Messages containing those sentinel strings are rejected.
+- **Scrubbed child env** — the relay's `claude` subprocess only inherits `PATH`, `HOME`, and `USER`. No API keys or credentials can leak.
 - **No shell interpolation** — `Bun.spawn` uses an explicit argv array; user text never appears on a command line.
 - **GCS encryption** — context pack is AES-256-GCM encrypted at rest. Key lives only in Secret Manager and `~/.env.cloud-coco`.
-- **Allowlist** — `ALLOWED_CHAT_IDS` is checked before any API call; unknown chat IDs receive no response and incur no cost.
+- **Allowlist** — `ALLOWED_CHAT_IDS` is checked before any Telegram API call; unknown chat IDs receive no response.
 - Never commit `~/.env.cloud-coco` or any file containing actual credentials.
