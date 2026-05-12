@@ -4,6 +4,7 @@ import { loadContextPack, loadConversationWindow, appendConversationEntry } from
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { askClaude } from "./claude.ts";
 import { sendMessage } from "./telegram.ts";
+import { handleMcpConnect, handleMcpMessage } from "./mcp.ts";
 
 const PORT = Number(process.env.PORT) || 8080;
 
@@ -191,6 +192,14 @@ Bun.serve({
 
     if (req.method === "POST" && url.pathname === "/webhook") {
       return handleWebhook(req);
+    }
+
+    if (req.method === "GET" && url.pathname === "/mcp") {
+      return handleMcpConnect(req, secrets, () => contextPack);
+    }
+
+    if (req.method === "POST" && url.pathname === "/mcp/message") {
+      return handleMcpMessage(req, secrets, () => contextPack);
     }
 
     return new Response(null, { status: 404 });

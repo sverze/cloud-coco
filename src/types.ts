@@ -45,4 +45,30 @@ export interface AppSecrets {
   webhookSecret: string;
   relayUrl: string | undefined;
   relayBearerToken: string | undefined;
+  mcpBearerToken: string | undefined;
+}
+
+export interface NoteEntry {
+  ts: string;
+  content: string;
+  tags?: string[];
+  topic?: string;
+  source: "claude-code";
+}
+
+export interface DecisionEntry {
+  ts: string;
+  title: string;
+  rationale: string;
+  context?: string;
+  project?: string;
+  source: "claude-code";
+}
+
+export interface LearningEntry {
+  ts: string;
+  insight: string;
+  source_note?: string;
+  project?: string;
+  source: "claude-code";
 }
