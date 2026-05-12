@@ -23,6 +23,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { readdir, readFile, appendFile, mkdir } from "node:fs/promises";
 import type { AppSecrets, ContextPack } from "./types.ts";
+import { loadContextPack, buildTemporalMeta } from "./memory.ts";
 import { sendMessage } from "./telegram.ts";
 
 // ── Protocol types ────────────────────────────────────────────────────────
@@ -239,6 +240,11 @@ const TOOLS = [
       required: ["text"],
     },
   },
+  {
+    name: "refresh_context_pack",
+    description: "Reload the context pack from GCS. Use this at the start of a Routine or session to ensure the identity snapshot is current before generating a daily brief or making goal-aware decisions.",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 // ── Tool execution ────────────────────────────────────────────────────────
@@ -248,6 +254,7 @@ async function executeTool(
   args: Record<string, unknown>,
   secrets: AppSecrets,
   getContextPack: () => ContextPack,
+  setContextPack: (pack: ContextPack) => void,
 ): Promise<string> {
   const now = new Date().toISOString();
 
@@ -276,6 +283,7 @@ async function executeTool(
     case "log_note": {
       const entry = {
         ts: now,
+        ...buildTemporalMeta(getContextPack()),
         content: args.content as string,
         ...(args.topic ? { topic: args.topic as string } : {}),
         ...(args.tags ? { tags: args.tags as string[] } : {}),
@@ -343,6 +351,7 @@ async function executeTool(
     case "log_decision": {
       const entry = {
         ts: now,
+        ...buildTemporalMeta(getContextPack()),
         title: args.title as string,
         rationale: args.rationale as string,
         ...(args.context ? { context: args.context as string } : {}),
@@ -356,6 +365,7 @@ async function executeTool(
     case "log_learning": {
       const entry = {
         ts: now,
+        ...buildTemporalMeta(getContextPack()),
         insight: args.insight as string,
         ...(args.source_note ? { source_note: args.source_note as string } : {}),
         ...(args.project ? { project: args.project as string } : {}),
@@ -401,6 +411,13 @@ async function executeTool(
       return `Message sent to ${chatIds.length} chat${chatIds.length !== 1 ? "s" : ""}.`;
     }
 
+    case "refresh_context_pack": {
+      const fresh = await loadContextPack(secrets.contextPackKey);
+      setContextPack(fresh);
+      const ageH = Math.floor((Date.now() - new Date(fresh.generated).getTime()) / 3_600_000);
+      return `Context pack refreshed. Generated: ${fresh.generated} (${ageH}h ago). Goals: ${fresh.active_goals.length}.`;
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -412,6 +429,7 @@ async function dispatch(
   msg: JsonRpcRequest,
   secrets: AppSecrets,
   getContextPack: () => ContextPack,
+  setContextPack: (pack: ContextPack) => void,
 ): Promise<JsonRpcResponse | null> {
   const id = ("id" in msg ? msg.id : undefined) ?? null;
   const isNotification = !("id" in msg);
@@ -441,7 +459,7 @@ async function dispatch(
 
       case "tools/call": {
         const { name, arguments: toolArgs = {} } = msg.params as { name: string; arguments?: Record<string, unknown> };
-        const text = await executeTool(name, toolArgs, secrets, getContextPack);
+        const text = await executeTool(name, toolArgs, secrets, getContextPack, setContextPack);
         return {
           jsonrpc: "2.0",
           id,
@@ -474,6 +492,7 @@ export async function handleMcpPost(
   req: Request,
   secrets: AppSecrets,
   getContextPack: () => ContextPack,
+  setContextPack: (pack: ContextPack) => void,
 ): Promise<Response> {
   if (!secrets.mcpBearerToken || !checkBearer(req, secrets.mcpBearerToken)) {
     return new Response(JSON.stringify({ error: "unauthorized" }), {
@@ -493,7 +512,7 @@ export async function handleMcpPost(
   const responses: JsonRpcResponse[] = [];
 
   for (const msg of messages) {
-    const response = await dispatch(msg, secrets, getContextPack);
+    const response = await dispatch(msg, secrets, getContextPack, setContextPack);
     if (response !== null) responses.push(response);
   }
 

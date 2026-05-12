@@ -12,7 +12,16 @@ export interface ContextPack {
   last_sync: string;
 }
 
-export interface ConversationEntry {
+// Temporal context stamped on every new longitudinal entry.
+// Optional so existing entries without these fields remain valid.
+export interface TemporalMeta {
+  week: string;             // ISO 8601 week — "2026-W20"
+  quarter: string;          // "2026-Q2"
+  goals_snapshot: string[]; // active_goals from context pack at write time
+  context_pack_ref: string; // context pack's generated timestamp
+}
+
+export interface ConversationEntry extends Partial<TemporalMeta> {
   ts: string;
   role: "user" | "assistant";
   content: string;
@@ -48,7 +57,7 @@ export interface AppSecrets {
   mcpBearerToken: string | undefined;
 }
 
-export interface NoteEntry {
+export interface NoteEntry extends Partial<TemporalMeta> {
   ts: string;
   content: string;
   tags?: string[];
@@ -56,7 +65,7 @@ export interface NoteEntry {
   source: "claude-code";
 }
 
-export interface DecisionEntry {
+export interface DecisionEntry extends Partial<TemporalMeta> {
   ts: string;
   title: string;
   rationale: string;
@@ -65,7 +74,7 @@ export interface DecisionEntry {
   source: "claude-code";
 }
 
-export interface LearningEntry {
+export interface LearningEntry extends Partial<TemporalMeta> {
   ts: string;
   insight: string;
   source_note?: string;

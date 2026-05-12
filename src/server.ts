@@ -1,7 +1,7 @@
 import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
 import type { AppSecrets, ContextPack, TelegramUpdate } from "./types.ts";
 import { loadSecrets } from "./secrets.ts";
-import { loadContextPack, loadConversationWindow, appendConversationEntry } from "./memory.ts";
+import { loadContextPack, loadConversationWindow, appendConversationEntry, buildTemporalMeta } from "./memory.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { askClaude } from "./claude.ts";
 import { sendMessage } from "./telegram.ts";
@@ -120,9 +120,10 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
   }
 
   const now = new Date().toISOString();
+  const temporal = buildTemporalMeta(contextPack);
   await Promise.all([
-    appendConversationEntry({ ts: now, role: "user", content: text }),
-    appendConversationEntry({ ts: new Date(Date.now() + 1).toISOString(), role: "assistant", content: reply }),
+    appendConversationEntry({ ts: now, role: "user", content: text, ...temporal }),
+    appendConversationEntry({ ts: new Date(Date.now() + 1).toISOString(), role: "assistant", content: reply, ...temporal }),
   ]);
 
   await sendMessage(chatId, reply, secrets.telegramToken);
@@ -198,7 +199,7 @@ Bun.serve({
     }
 
     if (url.pathname === "/mcp") {
-      if (req.method === "POST") return handleMcpPost(req, secrets, () => contextPack);
+      if (req.method === "POST") return handleMcpPost(req, secrets, () => contextPack, (p) => { contextPack = p; });
       return new Response(JSON.stringify({ error: "use POST for MCP Streamable HTTP transport" }), {
         status: 405,
         headers: { "content-type": "application/json", "allow": "POST" },

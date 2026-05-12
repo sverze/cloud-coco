@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import type { ContextPack, ConversationEntry } from "./types.ts";
+import type { ContextPack, ConversationEntry, TemporalMeta } from "./types.ts";
 
 const MEMORY_ROOT = "/memory";
 const CONVERSATIONS_DIR = `${MEMORY_ROOT}/conversations`;
@@ -60,6 +60,31 @@ export async function loadContextPack(key: Buffer): Promise<ContextPack> {
     console.warn(`[memory] context pack load failed in ${elapsed}ms (${(err as Error).message}), using empty context`);
     return EMPTY_CONTEXT_PACK;
   }
+}
+
+// ── Temporal helpers ───────────────────────────────────────────────────────
+
+function isoWeek(d: Date): string {
+  // ISO 8601: week containing the first Thursday of the year, weeks start Monday
+  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  utc.setUTCDate(utc.getUTCDate() + 4 - (utc.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((utc.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+  return `${utc.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+function isoQuarter(d: Date): string {
+  return `${d.getFullYear()}-Q${Math.ceil((d.getMonth() + 1) / 3)}`;
+}
+
+export function buildTemporalMeta(pack: ContextPack): TemporalMeta {
+  const d = new Date();
+  return {
+    week: isoWeek(d),
+    quarter: isoQuarter(d),
+    goals_snapshot: [...pack.active_goals],
+    context_pack_ref: pack.generated,
+  };
 }
 
 function dateString(offset = 0): string {
