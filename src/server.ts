@@ -20,7 +20,7 @@ console.log(`[server] startup complete — context pack age: ${ageH}h`);
 
 // ── Relay client ───────────────────────────────────────────────────────────
 
-const RELAY_HEALTH_TIMEOUT_MS = 1_000;
+const RELAY_HEALTH_TIMEOUT_MS = 5_000;
 const RELAY_MESSAGE_TIMEOUT_MS = 57_000;
 
 async function relayIsReachable(relayUrl: string): Promise<boolean> {
@@ -28,8 +28,10 @@ async function relayIsReachable(relayUrl: string): Promise<boolean> {
     const res = await fetch(`${relayUrl}/health`, {
       signal: AbortSignal.timeout(RELAY_HEALTH_TIMEOUT_MS),
     });
+    console.log(`[relay-health] ${res.ok ? "ok" : `http ${res.status}`}`);
     return res.ok;
-  } catch {
+  } catch (err) {
+    console.log(`[relay-health] unreachable: ${(err as Error).message}`);
     return false;
   }
 }

@@ -4,7 +4,7 @@ const FALLBACK = "Sorry, I ran into an issue. Try again in a moment.";
 const TIMEOUT_MS = 55_000;
 
 // Anthropic's managed web search — executed server-side, no client search API needed
-const WEB_SEARCH_TOOL = { type: "web_search_20250305" } as unknown as Anthropic.Tool;
+const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search" } as unknown as Anthropic.Tool;
 
 export async function askClaude(
   systemPrompt: string,
