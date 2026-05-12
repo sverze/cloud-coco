@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "bun src/server.ts",
-    "sync": "bun tools/sync-context-pack.ts"
+    "harvest": "bun tools/harvest.ts",
+    "sync": "bun tools/harvest.ts && bun tools/sync-context-pack.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0"
